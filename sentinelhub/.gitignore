@@ -1,0 +1,6 @@
+*.pyc
+*.swp
+*~
+*.tiff
+.virtual_documents/
+.ipynb_checkpoints/
