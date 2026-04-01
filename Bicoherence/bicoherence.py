@@ -206,6 +206,56 @@ np.testing.assert_allclose(f2, f2_res)
 np.testing.assert_allclose(bsp, bsp_res)
 
 
+def compute_auto_biphase(signal: npt.NDArray, sample_frequency: float, segment_length: int, n_overlap: int, use_next_fftlength: bool=True, window=np.hanning, f1_range=None, f2_range=None):
+    """Compute the auto-biphase. It is computed by averaging over the segments
+    Arguments:
+        - signal: the input signal on which to compute the biphase
+        - sample_frequency: the sample frequency of the signal
+        - segment_length: the length of individual segments on which to take the FFTs
+        - n_overlap: the number of samples of overlap between consecutive segments
+        - use_next_fftlength: whether or not to use the next length for which FFT is fast, default True
+        - window: the FFT windowing algorithm to use; None is no windowing; defaults to np.hanning
+        - f1_range: the range of frequencies for f1 in the biphase; None is as wide as possible
+        - f2_range: same as f1 but for f2
+    Returns:
+        - frequencies_1: the frequencies 1 for the biphase
+        - frequencies_2: the frequencies 2 for the biphase
+        - auto_biphase_mean: the auto-biphase array; unit is rad
+    """
+
+    assert isinstance(signal, np.ndarray)
+    assert signal.ndim == 1
+    assert np.issubdtype(signal.dtype, np.floating) or np.issubdtype(signal.dtype, np.integer)
+    
+    assert isinstance(sample_frequency, float)
+    assert sample_frequency > 0.0
+
+    assert isinstance(segment_length, int)
+    
+    assert isinstance(n_overlap, int)
+    
+    assert isinstance(use_next_fftlength, bool)
+
+    # split the signal in segments
+    array_of_signals = split_signal_into_segments(signal, segment_length, n_overlap, use_next_fftlength)
+    n_segments = array_of_signals.shape[0]
+
+    # compute the auto bispectrum on each segment
+    # put result in a new np.array
+    list_bispectrums = []
+    for crrt_segment_index in range(n_segments):
+        crrt_segment = array_of_signals[crrt_segment_index, :]
+        frequencies_1, frequencies_2, bispectrum_out = compute_auto_bispectrum(crrt_segment, sample_frequency, window, f1_range, f2_range, output="product")
+        list_bispectrums.append(bispectrum_out)
+
+    # look at the list_bispectrums
+    list_biphases = [np.angle(crrt_bispectrum, deg=False) for crrt_bispectrum in list_bispectrums]
+
+    auto_biphase_mean = np.mean(list_biphases, axis=0)
+
+    return frequencies_1, frequencies_2, auto_biphase_mean
+
+
 def compute_auto_bicoherence(signal: npt.NDArray, sample_frequency: float, segment_length: int, n_overlap: int, use_next_fftlength: bool=True, window=np.hanning, f1_range=None, f2_range=None, method="square_norm"):
     """Compute the auto-bicoherence.
     Arguments:
