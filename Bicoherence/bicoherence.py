@@ -1,7 +1,11 @@
 import numpy as np
 import numpy.typing as npt
 
+import math
+
 from scipy import fftpack
+
+import matplotlib.pyplot as plt
 
 # A verbose, possibly relatively slow, un-optimized implementation of real-signal bispectrum and bi-coherence.
 # The goal is correctness and ease-of-reading, not speed!
@@ -205,8 +209,9 @@ np.testing.assert_allclose(f1, f1_res)
 np.testing.assert_allclose(f2, f2_res)
 np.testing.assert_allclose(bsp, bsp_res)
 
+# TODO: go through, comment, warning a bit messy and a bit too many options...
 
-def compute_auto_biphase(signal: npt.NDArray, sample_frequency: float, segment_length: int, n_overlap: int, use_next_fftlength: bool=True, window=np.hanning, f1_range=None, f2_range=None):
+def compute_auto_biphase(signal: npt.NDArray, sample_frequency: float, segment_length: int, n_overlap: int, use_next_fftlength: bool=True, window=np.hanning, f1_range=None, f2_range=None, biphase_method="mean_then_angle", hide_low_bicoherence_threshold=0.5, low_bicoherence_threshold_method="square_norm", plot_distribution_peak=False, plot_distribution_peak_method="square_norm"):
     """Compute the auto-biphase. It is computed by averaging over the segments
     Arguments:
         - signal: the input signal on which to compute the biphase
@@ -217,6 +222,11 @@ def compute_auto_biphase(signal: npt.NDArray, sample_frequency: float, segment_l
         - window: the FFT windowing algorithm to use; None is no windowing; defaults to np.hanning
         - f1_range: the range of frequencies for f1 in the biphase; None is as wide as possible
         - f2_range: same as f1 but for f2
+        - biphase_method: either 1) "mean_then_angle" or 2) "angle_then_mean"; only 1) is recommended, see comments
+        - hide_low_bicoherence_threshold: None if show all biphase, or a threshold for min bicoherence otherwise - bins with lower bicoherence are replaced with NaN
+        - low_bicoherence_threshold_method: method to use to compute the bicoherence; should be a valid compute_auto_bicoherence method; only used for hide_low_bicoherence_threshold not None
+        - plot_distribution_peak: if should plot the distribution of phases in a hist plot for the bin that has the maximum bicoherence; only used for angle_then_mean
+        - plot_distribution_peak_method: method to use to compute the bicoherence; should be a valid compute_auto_bicoherence method; only used for angle_then_mean
     Returns:
         - frequencies_1: the frequencies 1 for the biphase
         - frequencies_2: the frequencies 2 for the biphase
@@ -236,6 +246,18 @@ def compute_auto_biphase(signal: npt.NDArray, sample_frequency: float, segment_l
     
     assert isinstance(use_next_fftlength, bool)
 
+    if biphase_method == "mean_then_angle":
+        pass
+    elif biphase_method == "angle_then_mean":
+        print("")
+        print("WARNING: angle_then_mean is not recommended!!!")
+        print("WARNING: see the documentation and comment for 'compute_auto_biphase' method!!!")
+        print("")
+
+    if hide_low_bicoherence_threshold is not None:
+        assert hide_low_bicoherence_threshold >= 0.0
+        assert hide_low_bicoherence_threshold <= 1.0
+
     # split the signal in segments
     array_of_signals = split_signal_into_segments(signal, segment_length, n_overlap, use_next_fftlength)
     n_segments = array_of_signals.shape[0]
@@ -248,11 +270,47 @@ def compute_auto_biphase(signal: npt.NDArray, sample_frequency: float, segment_l
         frequencies_1, frequencies_2, bispectrum_out = compute_auto_bispectrum(crrt_segment, sample_frequency, window, f1_range, f2_range, output="product")
         list_bispectrums.append(bispectrum_out)
 
-    # look at the list_bispectrums
-    list_biphases = [np.angle(crrt_bispectrum, deg=False) for crrt_bispectrum in list_bispectrums]
+    # averaging when there is some wrapping and not messing up conventions and signs and offsets is tricky...
+    # 
+    # first, there are 2 options: 1) average then angle, and 2) angle then average; option 1) average then angle should be more robust, because when taking the angle of
+    #    some stochastic quantities, the wrapping around the unit circle will distribute values everywhere and may create angles that are almost 360 degrees off and mess
+    #    up the mean
+    #
+    # second, there are different angle conventions - it is very easy to get a 90 degrees more or less, a factor + or - wrong, etc, if having subtle
+    #    mismatch in conventions / choices between the different parts of the work...
+    
+    # option 1: average then take the angle; this can be done "brutally"; just be careful of conventions
+    if biphase_method == "mean_then_angle":
+        auto_biphase_mean = np.angle(np.mean(np.array(list_bispectrums), axis=0), deg=False)
 
-    auto_biphase_mean = np.mean(list_biphases, axis=0)
+    # option 2: angle then average; then we need to take only the relevant non wrapped angles, otherwise things get messy...
+    #     note that close to the wrapping, this will always be messy :(
+    #     this is dis-recommended, we keep this only for documentation purpose
+    if biphase_method == "angle_then_mean":
+        # look at the list_bispectrums
+        list_biphases = [np.angle(crrt_bispectrum, deg=False) for crrt_bispectrum in list_bispectrums]
+    
+        auto_biphase_mean = np.mean(list_biphases, axis=0)
+        
+        nbins = min(len(auto_biphase_mean) / 100, 32)
+    
+        # show the difficulty with wrapping... there are wrapped values due to stochasticity, and this messes up / drags around the mean
+        if plot_distribution_peak:
+            f1, f2, bicoh = compute_auto_bicoherence(signal=signal, sample_frequency=sample_frequency, segment_length=segment_length, n_overlap=n_overlap, use_next_fftlength=use_next_fftlength, window=window, f1_range=f1_range, f2_range=f2_range, method=plot_distribution_peak_method)
+            row, col = np.unravel_index(np.argmax(bicoh), bicoh.shape)
+            list_values = [180.0 / math.pi * (np.angle(crrt_bispectrum[row, col], deg=False)) for crrt_bispectrum in list_bispectrums]
+            # print(list_values)
+    
+            fig, ax = plt.subplots()
+            ax.hist(list_values, bins=32, linewidth=0.5, edgecolor="white")
+            # ax.set(xlim=(0, 8), xticks=np.arange(1, 8), ylim=(0, 56), yticks=np.linspace(0, 56, 9))
+            plt.show()
 
+    if hide_low_bicoherence_threshold is not None:
+        f1, f2, bicoh = compute_auto_bicoherence(signal=signal, sample_frequency=sample_frequency, segment_length=segment_length, n_overlap=n_overlap, use_next_fftlength=use_next_fftlength, window=window, f1_range=f1_range, f2_range=f2_range, method=low_bicoherence_threshold_method)
+
+        auto_biphase_mean = np.where(bicoh > hide_low_bicoherence_threshold, auto_biphase_mean, np.nan)
+    
     return frequencies_1, frequencies_2, auto_biphase_mean
 
 
