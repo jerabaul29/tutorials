@@ -1,12 +1,14 @@
 import numpy as np
 import numpy.typing as npt
+import math
 
 from scipy import fftpack
 
 
-def generate_realization_from_PSD(psd: npt.NDArray, segment_length: int, n_overlap:int, total_number_segments: int, window=np.hanning, use_next_fftlength: bool=True, noise_level:float=1.0, cut_half_windows=True, real=True):
-    """Generate a pseudo-random realization of a given PSD, using ifft, that randomizes phases,
+def generate_realization_from_PSD(psd: npt.NDArray, segment_length: int, n_overlap:int, total_number_segments: int, window=np.hanning, use_next_fftlength: bool=True, noise_level:float=1.0, cut_half_windows=True, real=True, phase=None, phase_noise_level:float=math.pi/16.0):
+    """Generate a pseudo-random realization of a given PSD, using ifft,
     applies a random Gaussian scaling to each bin amplitude to enforce stochasticity,
+    applies either random phases (if phase=None) or a random Gaussian phase spreading,
     and uses a windowed segment method to avoid creating phase locking across the whole signal length.
     Arguments:
         - psd: the psd for which to generate a random realization
@@ -20,6 +22,9 @@ def generate_realization_from_PSD(psd: npt.NDArray, segment_length: int, n_overl
         - noise_level: the std of the gaussian multiplicative factor applied to bin amplitudes for fft-ing
         - cut_half_windows: whether to remove a half window of signal at the start and end to avoid transients
         - real: whether to output a real signal, by taking the real part of the fft
+        - phase: if 'None' use random phases, or otherwise use the provided phase with Gaussian phase spreading with phase_noise_level.
+            Unit: radians; should match shape of psd argument
+        - phase_noise_level: the amount of Gaussian phase spreading across segments (std deviation of a gaussian). Unit: radians
     Returns:
         - output: the produced signal
     """
@@ -40,6 +45,12 @@ def generate_realization_from_PSD(psd: npt.NDArray, segment_length: int, n_overl
     assert isinstance(noise_level, float)
     assert noise_level >= 0
     assert isinstance(cut_half_windows, bool)
+    assert isinstance(phase, np.ndarray) or phase is None
+    if phase is not None:
+        assert len(psd) == len(phase)
+        assert phase.ndim == 1
+        assert np.issubdtype(phase.dtype, np.floating) or np.issubdtype(phase.dtype, np.integer)
+    assert isinstance(phase_noise_level, float)
 
     if use_next_fftlength:
         segment_length = fftpack.next_fast_len(segment_length)
@@ -47,12 +58,18 @@ def generate_realization_from_PSD(psd: npt.NDArray, segment_length: int, n_overl
     if len(psd) > segment_length:
         print(f"WARNING: {len(psd)=}, but {segment_length=}; cutting the psd")
         psd = psd[:segment_length]
+        if phase is not None:
+            phase = phase[:segment_length]
 
     if len(psd) < segment_length:
         print(f"WARNING: {len(psd)=}, but {segment_length=}; extending the psd with mean value")
         psd_new = np.full((segment_length,), np.mean(psd))
         psd_new[:len(psd)] = psd
         psd = psd_new
+        if phase is not None:
+            phase_new = np.full((segment_length,), np.mean(phase))
+            phase_new[:len(phase)] = phase
+            phase = phase_new
 
     psd = psd * np.sqrt(segment_length) * 2.0 * (np.pi)**2
 
@@ -68,9 +85,15 @@ def generate_realization_from_PSD(psd: npt.NDArray, segment_length: int, n_overl
         crrt_noisy_spectrum = np.copy(psd)
         crrt_noisy_spectrum = np.sqrt(crrt_noisy_spectrum)
         crrt_noisy_spectrum = crrt_noisy_spectrum * np.random.normal(1, noise_level, (segment_length,))
-        crrt_random_phase = np.random.uniform(0, 2.0*np.pi, (segment_length,))
-        crrt_random_complex = np.exp(1j * crrt_random_phase)
-        crrt_noisy_spectrum = crrt_noisy_spectrum * crrt_random_complex
+        
+        if phase is None:
+            crrt_noisy_phase = np.random.uniform(0, 2.0*np.pi, (segment_length,))
+            crrt_noisy_phase_complex = np.exp(1j * crrt_noisy_phase)
+        else:
+            crrt_noisy_phase = np.random.uniform(0, phase_noise_level, (segment_length,)) + phase
+            crrt_noisy_phase_complex = np.exp(1j * crrt_noisy_phase)
+        
+        crrt_noisy_spectrum = crrt_noisy_spectrum * crrt_noisy_phase_complex
 
         crrt_noisy_signal = np.fft.ifft(crrt_noisy_spectrum)
         crrt_noisy_signal = crrt_noisy_signal * window
