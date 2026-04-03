@@ -258,6 +258,13 @@ def compute_auto_biphase(signal: npt.NDArray, sample_frequency: float, segment_l
         assert hide_low_bicoherence_threshold >= 0.0
         assert hide_low_bicoherence_threshold <= 1.0
 
+    if hide_low_bicoherence_threshold is None:
+        print("")
+        print("WARNING: hide_low_bicoherence_theshold=None is not recommended!!!")
+        print("This will plot the biphase everywhere, independently of bicoherence value")
+        print("Remember that biphase is only reliable where bicoherence is high enough")
+        print("")
+
     # split the signal in segments
     array_of_signals = split_signal_into_segments(signal, segment_length, n_overlap, use_next_fftlength)
     n_segments = array_of_signals.shape[0]
@@ -277,7 +284,7 @@ def compute_auto_biphase(signal: npt.NDArray, sample_frequency: float, segment_l
     #    up the mean
     #
     # second, there are different angle conventions - it is very easy to get a 90 degrees more or less, a factor + or - wrong, etc, if having subtle
-    #    mismatch in conventions / choices between the different parts of the work...
+    #    mismatch in conventions / choices between the different parts of the work... make sure to double check to your application and the exact conventions used!
     
     # option 1: average then take the angle; this can be done "brutally"; just be careful of conventions
     if biphase_method == "mean_then_angle":

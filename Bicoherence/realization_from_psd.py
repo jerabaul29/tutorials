@@ -22,7 +22,8 @@ def generate_realization_from_PSD(psd: npt.NDArray, segment_length: int, n_overl
         - noise_level: the std of the gaussian multiplicative factor applied to bin amplitudes for fft-ing
         - cut_half_windows: whether to remove a half window of signal at the start and end to avoid transients
         - real: whether to output a real signal, by taking the real part of the fft
-        - phase: if 'None' use random phases, or otherwise use the provided phase with Gaussian phase spreading with phase_noise_level. Unit: radians
+        - phase: if 'None' use random phases, or otherwise use the provided phase with Gaussian phase spreading with phase_noise_level.
+            Unit: radians; should match shape of psd argument
         - phase_noise_level: the amount of Gaussian phase spreading across segments (std deviation of a gaussian). Unit: radians
     Returns:
         - output: the produced signal
