@@ -359,6 +359,8 @@ def compute_auto_bicoherence(signal: npt.NDArray, sample_frequency: float, segme
         output = "list"
     elif method == "square_norm_indep":
         output = "list"
+        print("WARNING!! this methoed is a buggy way to do it, that does not work - mathematically wrong!!")
+        print("WARNING!! this method will not work, do not use it if not just for illustration purposes!!")
     else:
         raise RuntimeError("Unknown method!")
     
