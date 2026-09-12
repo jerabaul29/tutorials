@@ -49,12 +49,14 @@ def split_signal_into_segments(signal: npt.NDArray, segment_length: int, n_overl
     return array_of_signals
 
 
-def find_first_greater_or_equal_index(value: float, array: npt.NDArray):
+def find_first_strictly_greater_index(value: float, array: npt.NDArray):
     """Find the index of the first element in the array that is strictly greater than value.
-    If none, return the last index."""
+    If none, return the last index.
 
-    # strictly greater: get_f_range_index then steps back by one to include the
-    # first bin that is >= value when frequencies are the rfft grid
+    Note: this is intentionally a strict ">", not ">="; the caller (get_f_range_index)
+    steps back by one afterwards to also include the first bin that is >= value when
+    frequencies are the rfft grid."""
+
     bool_array = array > value
     if bool_array.any():
         return int(np.argmax(bool_array))
@@ -83,11 +85,11 @@ def get_f_range_index(f_range, frequencies: npt.NDArray):
         assert isinstance(f_range[0], float)
         assert isinstance(f_range[1], float)
         assert f_range[0] < f_range[1]
-        idx_min = find_first_greater_or_equal_index(f_range[0], frequencies)
+        idx_min = find_first_strictly_greater_index(f_range[0], frequencies)
         if idx_min > 1:
             idx_min = idx_min - 1
         idx_min = max(1, idx_min)
-        idx_max = find_first_greater_or_equal_index(f_range[1], frequencies)
+        idx_max = find_first_strictly_greater_index(f_range[1], frequencies)
         if idx_max < len(frequencies) - 2:
             idx_max = idx_max + 1
         idx_max = min(idx_max, len(frequencies) - 1)
@@ -280,8 +282,7 @@ def compute_auto_bicoherence(signal: npt.NDArray, sample_frequency: float, segme
         - f2_range: same as f1 but for f2
         - method: how to combine the bispectra on all segments into b^2:
             "square_norm" (recommended, Kim-Powers),
-            "absolute_norm" ( |sum B|/sum|B| , then squared so the return is still a b^2-like quantity in [0, 1]),
-            "square_norm_indep" (incorrect independent-power normalization, for illustration only)
+            "absolute_norm" ( |sum B|/sum|B| , then squared so the return is still a b^2-like quantity in [0, 1])
     Returns:
         - frequencies_1: the frequencies 1 for the bicoherence
         - frequencies_2: the frequencies 2 for the bicoherence
@@ -300,16 +301,12 @@ def compute_auto_bicoherence(signal: npt.NDArray, sample_frequency: float, segme
 
     assert isinstance(use_next_fftlength, bool)
 
-    assert method == "absolute_norm" or method == "square_norm" or method == "square_norm_indep"
+    assert method == "absolute_norm" or method == "square_norm"
 
     if method == "absolute_norm":
         output = "product"
     elif method == "square_norm":
         output = "list"
-    elif method == "square_norm_indep":
-        output = "list"
-        print("WARNING!! this method is a buggy way to do it, that does not work - mathematically wrong!!")
-        print("WARNING!! this method will not work, do not use it if not just for illustration purposes!!")
     else:
         raise RuntimeError("Unknown method!")
 
@@ -337,14 +334,6 @@ def compute_auto_bicoherence(signal: npt.NDArray, sample_frequency: float, segme
         # using means: that identity is mean * n, so the extra n**2 belongs in the denominator
         num = np.abs(np.sum(array_Ff1 * array_Ff2 * array_Ff3, axis=0)) ** 2
         denum = np.mean(np.abs(array_Ff1 * array_Ff2) ** 2, axis=0) * np.mean(np.abs(array_Ff3) ** 2, axis=0) * (n ** 2)
-        auto_bicoherence = num / denum
-    elif method == "square_norm_indep":
-        array_Ff1 = np.array([elem[0] for elem in list_bispectrums])
-        array_Ff2 = np.array([elem[1] for elem in list_bispectrums])
-        array_Ff3 = np.array([elem[2] for elem in list_bispectrums])
-        n = len(list_bispectrums)
-        num = np.abs(np.sum(array_Ff1 * array_Ff2 * array_Ff3, axis=0)) ** 2
-        denum = np.mean(np.abs(array_Ff1) ** 2, axis=0) * np.mean(np.abs(array_Ff2) ** 2, axis=0) * np.mean(np.abs(array_Ff3) ** 2, axis=0) * (n ** 2)
         auto_bicoherence = num / denum
     else:
         raise RuntimeError("Unknown method!")
