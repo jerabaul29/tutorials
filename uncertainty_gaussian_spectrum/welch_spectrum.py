@@ -8,6 +8,7 @@ Dependencies: numpy, scipy, matplotlib.
 
 from __future__ import annotations
 
+import warnings
 from typing import NamedTuple
 
 import numpy as np
@@ -48,7 +49,7 @@ def estimate_welch_edf(
     n_total: int,
     nperseg: int,
     noverlap: int,
-    window: str | ArrayLike = "hann",
+    window: str | tuple | ArrayLike = "hann",
 ) -> tuple[float, int]:
     """Effective chi-squared degrees of freedom for a Welch PSD.
 
@@ -67,8 +68,9 @@ def estimate_welch_edf(
     if K <= 0:
         raise ValueError("Signal is too short for the chosen segment configuration.")
 
-    if isinstance(window, str):
-        w = signal.get_window(window, nperseg)
+    if isinstance(window, (str, tuple)):
+        # fftbins=True: same periodic taper scipy.welch uses via get_window.
+        w = signal.get_window(window, nperseg, fftbins=True)
     else:
         w = np.asarray(window, dtype=float)
         if w.shape != (nperseg,):
@@ -118,7 +120,11 @@ def _gaussianity_metrics(x: NDArray[np.floating]) -> dict:
     mu, sigma = stats.norm.fit(x)
     skewness = float(stats.skew(x))
     ex_kurtosis = float(stats.kurtosis(x))
-    agostino_stat, agostino_p = stats.normaltest(x)
+    if x.size >= 8:
+        agostino_stat, agostino_p = stats.normaltest(x)
+        agostino_stat, agostino_p = float(agostino_stat), float(agostino_p)
+    else:
+        agostino_stat, agostino_p = float("nan"), float("nan")
     skew_ok = abs(skewness) <= 1.0
     kurt_ok = abs(ex_kurtosis) <= 2.0
     return {
@@ -127,21 +133,23 @@ def _gaussianity_metrics(x: NDArray[np.floating]) -> dict:
         "sigma": float(sigma),
         "skewness": skewness,
         "excess_kurtosis": ex_kurtosis,
-        "agostino_stat": float(agostino_stat),
-        "agostino_p": float(agostino_p),
+        "agostino_stat": agostino_stat,
+        "agostino_p": agostino_p,
         "practically_normal": bool(skew_ok and kurt_ok),
     }
 
 
 def _acf_one_sided(x: NDArray[np.floating]) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
     centered = x - np.mean(x)
-    acf = signal.correlate(centered, centered, mode="full", method="fft")
-    acf = acf[x.size - 1 :]
-    if acf[0] == 0:
+    acf_full = signal.correlate(centered, centered, mode="full", method="fft")
+    mid = x.size - 1
+    if acf_full[mid] == 0:
         raise ValueError("Signal has zero variance; autocorrelation is undefined.")
-    normalized = acf / acf[0]
-    envelope = np.abs(signal.hilbert(normalized))
-    return normalized, envelope
+    acf_full = acf_full / acf_full[mid]
+    # Hilbert of the two-sided ACF, then positive lags: envelope(0) = 1, unlike
+    # Hilbert of the causal one-sided ACF (edge transient, envelope(0) ~ 1.2).
+    envelope = np.abs(signal.hilbert(acf_full))[mid:]
+    return acf_full[mid:], envelope
 
 
 def _acf_decay_time(
@@ -155,10 +163,10 @@ def _acf_decay_time(
 
 def _stationarity_windows(
     x: NDArray[np.floating], nperseg: int
-) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+) -> tuple[NDArray[np.floating], NDArray[np.floating]] | None:
     n_win = x.size // nperseg
     if n_win < 2:
-        raise ValueError("Need at least 2 non-overlapping segments for a stationarity check.")
+        return None
     windows = x[: n_win * nperseg].reshape(n_win, nperseg)
     return windows.mean(axis=1), windows.std(axis=1, ddof=0)
 
@@ -272,6 +280,8 @@ def _plot_welch(
     n_segments: int,
     overlap: float,
     window_label: str,
+    scaling: str,
+    freq_range: tuple[float, float] | None = None,
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -284,8 +294,13 @@ def _plot_welch(
         alpha=0.25,
         label=f"{100 * confidence_level:.0f}% $\\chi^2$ interval",
     )
-    # Constant-length legend bar on log-y (multiplicative interval).
-    pos = max(1, psd.size // 4)
+    # Constant-length legend bar on log-y (multiplicative interval), inside the view.
+    if freq_range is None:
+        in_view = np.ones(frequency.size, dtype=bool)
+    else:
+        in_view = (frequency >= freq_range[0]) & (frequency <= freq_range[1])
+    idx = np.flatnonzero(in_view)
+    pos = int(idx[len(idx) // 2]) if idx.size else max(1, psd.size // 4)
     x_bar = frequency[pos]
     y_bar = psd[pos]
     ax.errorbar(
@@ -303,7 +318,9 @@ def _plot_welch(
         ),
     )
     ax.set_xlabel("f [Hz]")
-    ax.set_ylabel("PSD")
+    ax.set_ylabel("PSD [power/Hz]" if scaling == "density" else "PSD [power]")
+    if freq_range is not None:
+        ax.set_xlim(freq_range[0], freq_range[1])
     ax.legend()
     fig.tight_layout()
     plt.show()
@@ -312,7 +329,7 @@ def _plot_welch(
 def welch_spectrum_with_checks_and_uncertainties(
     signal_values: ArrayLike,
     sample_rate: float,
-    window: str | ArrayLike = "hann",
+    window: str | tuple | ArrayLike = "hann",
     nperseg: int | None = None,
     noverlap: int | None = None,
     confidence_level: float = 0.95,
@@ -320,6 +337,8 @@ def welch_spectrum_with_checks_and_uncertainties(
     plot: bool = False,
     detrend: str | None = "constant",
     scaling: str = "density",
+    nfft: int | None = None,
+    freq_range: tuple[float, float] | None = None,
 ) -> WelchSpectrumResult:
     """Welch PSD of a real series, with checks and chi-squared interval.
 
@@ -327,7 +346,8 @@ def welch_spectrum_with_checks_and_uncertainties(
     formal normality test), (ii) autocorrelation time vs segment length,
     (iii) mean/std stationarity on non-overlapping segments, (iv) Welch PSD
     with a two-sided χ² interval at ``confidence_level`` using the general
-    overlap-taper EDF. Checks warn; they do not abort the estimate.
+    overlap-taper EDF. Failed checks emit ``warnings.warn`` and a verbose
+    note; they do not abort the estimate.
 
     Parameters
     ----------
@@ -335,13 +355,18 @@ def welch_spectrum_with_checks_and_uncertainties(
         1-D real array.
     sample_rate :
         Sampling frequency $f_s$ in Hz.
-    window, nperseg, noverlap, detrend, scaling :
+    window, nperseg, noverlap, detrend, scaling, nfft :
         Passed to ``scipy.signal.welch`` (``nperseg`` defaults to 256 as in
-        SciPy; ``noverlap`` defaults to 50% of ``nperseg``).
+        SciPy; ``noverlap`` defaults to 50% of ``nperseg``; ``nfft`` defaults
+        to ``nperseg``). ``window`` may be a SciPy name, a ``(name, *params)``
+        tuple, or a length-``nperseg`` array.
     confidence_level :
         Two-sided level for the χ² interval, e.g. 0.95.
     verbose, plot :
         Print summaries and/or show the same diagnostic figures as the notebook.
+    freq_range :
+        Optional ``(f_min, f_max)`` in Hz applied only to the final periodogram
+        plot (returned arrays are still the full Welch grid).
 
     Returns
     -------
@@ -356,8 +381,14 @@ def welch_spectrum_with_checks_and_uncertainties(
     if nperseg is None:
         nperseg = 256
     nperseg = int(nperseg)
-    if nperseg < 2 or nperseg > x.size:
-        raise ValueError("nperseg must satisfy 2 <= nperseg <= len(signal).")
+    if nperseg < 2:
+        raise ValueError("nperseg must be >= 2.")
+    if nperseg > x.size:
+        warnings.warn(
+            f"nperseg={nperseg} > len(signal)={x.size}; using nperseg={x.size}.",
+            stacklevel=2,
+        )
+        nperseg = int(x.size)
 
     if noverlap is None:
         noverlap = nperseg // 2
@@ -365,15 +396,38 @@ def welch_spectrum_with_checks_and_uncertainties(
     if not 0 <= noverlap < nperseg:
         raise ValueError("noverlap must satisfy 0 <= noverlap < nperseg.")
 
+    if nfft is None:
+        nfft = nperseg
+    nfft = int(nfft)
+    if nfft < nperseg:
+        raise ValueError("nfft must be >= nperseg.")
+
     t_seg_s = nperseg / sample_rate
+    hop = nperseg - noverlap
     overlap_frac = noverlap / nperseg
-    window_label = window if isinstance(window, str) else "custom"
+    if isinstance(window, str):
+        window_label = window
+    elif isinstance(window, tuple):
+        window_label = str(window)
+    else:
+        window_label = "custom"
+
+    if freq_range is not None:
+        f_min, f_max = freq_range
+        if not (np.isfinite(f_min) and np.isfinite(f_max) and f_min < f_max):
+            raise ValueError("freq_range must be (f_min, f_max) with f_min < f_max.")
 
     edof, n_segments = estimate_welch_edf(x.size, nperseg, noverlap, window=window)
     scale_lo, scale_hi = _chi2_scale_factors(edof, confidence_level)
 
     # --- i) Gaussianity (large-N practical check) ---
     gauss = _gaussianity_metrics(x)
+    if not gauss["practically_normal"]:
+        warnings.warn(
+            "Marginal distribution is not near-Gaussian (skew/kurtosis); "
+            "χ² periodogram intervals may be a poor approximation.",
+            stacklevel=2,
+        )
     if verbose:
         print("=== Gaussianity (large-N practical check) ===")
         print(
@@ -381,11 +435,18 @@ def welch_spectrum_with_checks_and_uncertainties(
             "real records; use skew, excess kurtosis, and a Q-Q plot."
         )
         print(f"N = {gauss['n']}, mean = {gauss['mu']:.6g}, std = {gauss['sigma']:.6g}")
-        print(
-            f"D'Agostino K² statistic = {gauss['agostino_stat']:.4f}, "
-            f"p = {gauss['agostino_p']:.4g} "
-            f"({'reject Gaussian at 5%' if gauss['agostino_p'] <= 0.05 else 'do not reject at 5%'})"
-        )
+        if np.isfinite(gauss["agostino_p"]):
+            dag_msg = (
+                "reject Gaussian at 5%"
+                if gauss["agostino_p"] <= 0.05
+                else "do not reject at 5%"
+            )
+            print(
+                f"D'Agostino K² statistic = {gauss['agostino_stat']:.4f}, "
+                f"p = {gauss['agostino_p']:.4g} ({dag_msg})"
+            )
+        else:
+            print("D'Agostino K²: skipped (need N >= 8)")
         print(f"Skewness = {gauss['skewness']:.4f} (practical |skew| <= 1)")
         print(f"Excess kurtosis = {gauss['excess_kurtosis']:.4f} (practical |excess kurtosis| <= 2)")
         if gauss["practically_normal"]:
@@ -404,13 +465,23 @@ def welch_spectrum_with_checks_and_uncertainties(
     lags_s = np.arange(acf.size) / sample_rate
     tau_s = _acf_decay_time(envelope, sample_rate)
     acf_ok = t_seg_s >= 3.0 * tau_s
+    acf_hop = float(acf[hop]) if hop < acf.size else float("nan")
+    acf_seg = float(acf[nperseg]) if nperseg < acf.size else float("nan")
+    if not acf_ok:
+        warnings.warn(
+            f"T_seg={t_seg_s:.4g}s is not >> τ_acf={tau_s:.4g}s; "
+            "Welch EDF may be optimistic (segments not independent).",
+            stacklevel=2,
+        )
     if verbose:
         print("=== Autocorrelation time vs segment length ===")
         print(
-            "Envelope is the Hilbert envelope of the one-sided ACF (visual decay, "
-            "not a theorem). τ_acf = first lag where the envelope drops below 0.2."
+            "Envelope is the Hilbert envelope of the two-sided ACF, positive lags "
+            "(visual decay, not a theorem). τ_acf = first lag where the envelope "
+            "drops below 0.2."
         )
-        print(f"τ_acf ≈ {tau_s:.4g} s, T_seg = {t_seg_s:.4g} s, T_seg / τ_acf = {t_seg_s / tau_s:.3g}")
+        print(f"τ_acf ≈ {tau_s:.4g} s, T_seg = {t_seg_s:.4g} s, T_seg / τ_acf = {t_seg_s / max(tau_s, 1e-15):.3g}")
+        print(f"ACF(hop) = {acf_hop:.4g}, ACF(T_seg) = {acf_seg:.4g}")
         if acf_ok:
             print("Verdict: segment length is comfortably above the ACF decay time.")
         else:
@@ -423,27 +494,44 @@ def welch_spectrum_with_checks_and_uncertainties(
         _plot_acf(lags_s, acf, envelope, tau_s, t_seg_s)
 
     # --- iii) Stationarity ---
-    means, stds = _stationarity_windows(x, nperseg)
-    typical_std = float(np.mean(stds))
-    mean_drift = float(np.ptp(means) / typical_std) if typical_std > 0 else 0.0
-    std_spread = float(np.ptp(stds) / typical_std) if typical_std > 0 else 0.0
-    stat_ok = mean_drift <= 0.5 and std_spread <= 0.3
-    if verbose:
-        print("=== Stationarity (non-overlapping segments of length nperseg) ===")
-        print(
-            "Mean drift is (max mean − min mean) / typical window std — use this, "
-            "not the relative change of a large DC offset (e.g. gravity)."
+    stat = _stationarity_windows(x, nperseg)
+    if stat is None:
+        warnings.warn(
+            "Fewer than 2 non-overlapping segments; skipping stationarity check.",
+            stacklevel=2,
         )
-        print(f"{means.size} windows of {t_seg_s:.4g} s")
-        print(f"Window means: min={means.min():.6g}, max={means.max():.6g}, drift/σ = {mean_drift:.3g}")
-        print(f"Window stds:  min={stds.min():.6g}, max={stds.max():.6g}, range/mean = {std_spread:.3g}")
-        if stat_ok:
-            print("Verdict: no large trend in mean (in σ units) or in variance.")
-        else:
-            print("WARNING: mean and/or variance look non-stationary across segments.")
-        print()
-    if plot:
-        _plot_stationarity(means, stds, t_seg_s)
+        if verbose:
+            print("=== Stationarity (non-overlapping segments of length nperseg) ===")
+            print("Skipped: need at least 2 non-overlapping segments.")
+            print()
+    else:
+        means, stds = stat
+        typical_std = float(np.mean(stds))
+        mean_drift = float(np.ptp(means) / typical_std) if typical_std > 0 else 0.0
+        std_spread = float(np.ptp(stds) / typical_std) if typical_std > 0 else 0.0
+        stat_ok = mean_drift <= 0.5 and std_spread <= 0.3
+        if not stat_ok:
+            warnings.warn(
+                "Mean and/or variance look non-stationary across segments "
+                f"(drift/σ={mean_drift:.3g}, std range/mean={std_spread:.3g}).",
+                stacklevel=2,
+            )
+        if verbose:
+            print("=== Stationarity (non-overlapping segments of length nperseg) ===")
+            print(
+                "Mean drift is (max mean − min mean) / typical window std — use this, "
+                "not the relative change of a large DC offset (e.g. gravity)."
+            )
+            print(f"{means.size} windows of {t_seg_s:.4g} s")
+            print(f"Window means: min={means.min():.6g}, max={means.max():.6g}, drift/σ = {mean_drift:.3g}")
+            print(f"Window stds:  min={stds.min():.6g}, max={stds.max():.6g}, range/mean = {std_spread:.3g}")
+            if stat_ok:
+                print("Verdict: no large trend in mean (in σ units) or in variance.")
+            else:
+                print("WARNING: mean and/or variance look non-stationary across segments.")
+            print()
+        if plot:
+            _plot_stationarity(means, stds, t_seg_s)
 
     # --- iv) Welch + χ² interval ---
     frequency, psd = signal.welch(
@@ -452,7 +540,7 @@ def welch_spectrum_with_checks_and_uncertainties(
         window=window,
         nperseg=nperseg,
         noverlap=noverlap,
-        nfft=nperseg,
+        nfft=nfft,
         detrend=detrend,
         return_onesided=True,
         scaling=scaling,
@@ -489,6 +577,8 @@ def welch_spectrum_with_checks_and_uncertainties(
             n_segments,
             overlap_frac,
             window_label,
+            scaling,
+            freq_range,
         )
 
     return WelchSpectrumResult(
